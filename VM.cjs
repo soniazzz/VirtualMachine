@@ -602,6 +602,73 @@ const compile_comp = {
     compile(comp.scnd, ce)
     instrs[wc++] = { tag: 'BINOP', sym: comp.sym }
   },
+  log: (comp, ce) => {
+    compile(
+      comp.sym == '&&'
+        ? {
+            tag: 'cond_expr',
+            pred: comp.frst,
+            cons: { tag: 'lit', val: true },
+            alt: comp.scnd,
+          }
+        : {
+            tag: 'cond_expr',
+            pred: cmd.frst,
+            cons: cmd.scnd,
+            alt: { tag: 'lit', val: false },
+          },
+      ce
+    )
+  },
+  cond: (comp, ce) => {
+    if (comp.alt !== undefined) {
+      compile(comp.pred, ce)
+      const jump_on_false_instruction = { tag: 'JOF' }
+      instrs[wc++] = jump_on_false_instruction
+      compile(comp.cons, ce)
+      const goto_instruction = { tag: 'GOTO' }
+      instrs[wc++] = goto_instruction
+      const alternative_address = wc
+      jump_on_false_instruction.addr = alternative_address
+      compile(comp.alt, ce)
+      goto_instruction.addr = wc
+    } else {
+      display('hoho')
+      compile(comp.pred, ce)
+      // Jump on false needs to skip over the 'then' block if the condition is false
+      const jump_on_false_instruction = { tag: 'JOF' }
+      instrs[wc++] = jump_on_false_instruction
+      compile(comp.cons, ce)
+      // Set the address to jump to if the condition is false
+      jump_on_false_instruction.addr = wc
+    }
+  },
+  // cond: (comp, ce) => {
+  //   compile(comp.pred, ce)
+
+  //   // Jump on false needs to skip over the 'then' block if the condition is false
+  //   const jump_on_false_instruction = { tag: 'JOF' }
+  //   instrs[wc++] = jump_on_false_instruction
+
+  //   compile(comp.cons, ce)
+
+  //   // Only insert a GOTO instruction if there is an 'else' block
+  //   let goto_instruction
+  //   if (comp.alt!==undefined) {
+  //     goto_instruction = { tag: 'GOTO' }
+  //     instrs[wc++] = goto_instruction
+  //   }
+
+  //   const after_then_address = wc
+  //   // Set the address to jump to if the condition is false
+  //   jump_on_false_instruction.addr = after_then_address
+
+  //   // If there is an 'else' part, compile it and update the GOTO instruction
+  //   if (comp.alt!==undefined) {
+  //     compile(comp.alt, ce)
+  //     goto_instruction.addr = wc
+  //   }
+  // },
   assmt:
     // store precomputed position info in ASSIGN instruction
     (comp, ce) => {
@@ -629,6 +696,9 @@ const compile_comp = {
 // compile component into instruction array instrs,
 // starting at wc (write counter)
 const compile = (comp, ce) => {
+  display('==========')
+  display(comp)
+  display('==========')
   compile_comp[comp.tag](comp, ce)
 }
 
@@ -661,14 +731,17 @@ const binop_microcode = {
   '>=': (x, y) => x >= y,
   '>': (x, y) => x > y,
   '===': (x, y) => x === y,
+  '==': (x, y) => x == y,
   '!==': (x, y) => x !== y,
 }
 
 // v2 is popped before v1
-const apply_binop = (op, v2, v1) =>
-  JS_value_to_address(
+const apply_binop = (op, v2, v1) => {
+  let result = JS_value_to_address(
     binop_microcode[op](address_to_JS_value(v1), address_to_JS_value(v2))
   )
+  return result
+}
 
 const unop_microcode = {
   '-unary': (x) => -x,
@@ -722,8 +795,28 @@ const microcode = {
   LDC: (instr) => push(OS, JS_value_to_address(instr.val)),
   UNOP: (instr) => push(OS, apply_unop(instr.sym, OS.pop())),
   BINOP: (instr) => push(OS, apply_binop(instr.sym, OS.pop(), OS.pop())),
+  // BINOP: (instr) =>{
+  //   let op1 = OS.pop()
+  //   let op2 = OS.pop()
+  //   let sym = instr.sym
+  //   let result = apply_binop(sym, op1, op2)
+  //   display('op1: ')
+  //   display(address_to_JS_value(op1))
+  //   display('op2: ')
+  //   display(address_to_JS_value(op2))
+  //   display('sym: ')
+  //   display(sym)
+  //   display('result: ')
+  //   display(result)
+  //   push(OS, result)} ,
   POP: (instr) => OS.pop(),
   JOF: (instr) => (PC = is_True(OS.pop()) ? PC : instr.addr),
+  // JOF: (instr) => {
+  //   display("haha")
+  //   print_OS()
+  //   let result=is_True(OS.pop())
+  //   display(result)
+  //   PC = result ? PC : instr.addr},
   GOTO: (instr) => (PC = instr.addr),
   ENTER_SCOPE: (instr) => {
     push(RTS, heap_allocate_Blockframe(E))
@@ -802,15 +895,15 @@ function run() {
   while (!(instrs[PC].tag === 'DONE')) {
     //heap_display()
     //display(PC, "PC: ")
-    //display(instrs[PC].tag, "instr: ")
+    display(instrs[PC].tag, 'instr: ')
     //print_OS("\noperands:            ");
     //print_RTS("\nRTS:            ");
     const instr = instrs[PC++]
-    //display(instrs[PC].tag, "next instruction: ")
+    // display(instrs[PC].tag, "next instruction: ")
     microcode[instr.tag](instr)
   }
-  //display(OS, "\nfinal operands:           ")
-  //print_OS()
+  display(OS, '\nfinal operands:           ')
+  print_OS()
   return address_to_JS_value(peek(OS, 0))
 }
 
@@ -830,7 +923,8 @@ const print_code = () => {
         (instr.tag === 'LDC' ? stringify(instr.val) : '') +
         (instr.tag === 'ASSIGN' ? stringify(instr.pos) : '') +
         (instr.tag === 'LD' ? stringify(instr.pos) : '') +
-        (instr.tag === 'BINOP' ? stringify(instr.sym) : '')
+        (instr.tag === 'BINOP' ? stringify(instr.sym) : '') +
+        (instr.tag === 'JOF' ? stringify(instr.addr) : '')
     )
   }
 }
@@ -858,7 +952,7 @@ const run_vm = (jsonASTString) => {
 }
 
 let result = run_vm(
-  `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"x"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"lit","val":3},"scnd":{"tag":"lit","val":4}}]}]}}`
+  `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"lit","val":10}]},{"tag":"cond","pred":{"tag":"binop","sym":">","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":0}},"cons":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":3}}]},{"tag":"cond","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":15}},"cons":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]},"alt":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"-","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]}}]},"alt":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"-","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]}}]}}`
 )
 display(result)
 
