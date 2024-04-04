@@ -552,18 +552,28 @@ const global_compile_environment = [global_compile_frame]
 
 // scanning out the declarations from (possibly nested)
 // sequences of statements, ignoring blocks
-const scan = (comp) => {
+const scan = (comp, ce) => {
+  let result
   if (comp.tag === 'seq') {
-    return comp.stmts.reduce((acc, x) => acc.concat(scan(x)), [])
-  } else if (['assmt'].includes(comp.tag)) {
+    result = comp.stmts.reduce((acc, x) => acc.concat(scan(x, ce)), [])
+  } else if (['assmt', 'fun'].includes(comp.tag)) {
     let temp = []
     for (let i = 0; i < comp.sym.length; i++) {
-      temp.push(comp.sym[i].sym)
+      let flag = false
+      for (let j = 0; j < ce.length; j++) {
+        if (ce[j].includes(comp.sym[i].sym)) {
+          flag = true
+        }
+      }
+      if (flag != true) {
+        temp.push(comp.sym[i].sym)
+      }
     }
-    return temp
+    result = temp
   } else {
-    return []
+    result = []
   }
+  return result
 }
 
 const compile_sequence = (seq, ce) => {
@@ -633,7 +643,6 @@ const compile_comp = {
       compile(comp.alt, ce)
       goto_instruction.addr = wc
     } else {
-      display('hoho')
       compile(comp.pred, ce)
       // Jump on false needs to skip over the 'then' block if the condition is false
       const jump_on_false_instruction = { tag: 'JOF' }
@@ -643,32 +652,17 @@ const compile_comp = {
       jump_on_false_instruction.addr = wc
     }
   },
-  // cond: (comp, ce) => {
-  //   compile(comp.pred, ce)
-
-  //   // Jump on false needs to skip over the 'then' block if the condition is false
-  //   const jump_on_false_instruction = { tag: 'JOF' }
-  //   instrs[wc++] = jump_on_false_instruction
-
-  //   compile(comp.cons, ce)
-
-  //   // Only insert a GOTO instruction if there is an 'else' block
-  //   let goto_instruction
-  //   if (comp.alt!==undefined) {
-  //     goto_instruction = { tag: 'GOTO' }
-  //     instrs[wc++] = goto_instruction
-  //   }
-
-  //   const after_then_address = wc
-  //   // Set the address to jump to if the condition is false
-  //   jump_on_false_instruction.addr = after_then_address
-
-  //   // If there is an 'else' part, compile it and update the GOTO instruction
-  //   if (comp.alt!==undefined) {
-  //     compile(comp.alt, ce)
-  //     goto_instruction.addr = wc
-  //   }
-  // },
+  for: (comp, ce) => {
+    const loop_start = wc
+    compile(comp.pred, ce)
+    const jump_on_false_instruction = { tag: 'JOF' }
+    instrs[wc++] = jump_on_false_instruction
+    compile(comp.body, ce)
+    instrs[wc++] = { tag: 'POP' }
+    instrs[wc++] = { tag: 'GOTO', addr: loop_start }
+    jump_on_false_instruction.addr = wc
+    instrs[wc++] = { tag: 'LDC', val: undefined }
+  },
   assmt:
     // store precomputed position info in ASSIGN instruction
     (comp, ce) => {
@@ -682,23 +676,26 @@ const compile_comp = {
     },
   seq: (comp, ce) => compile_sequence(comp.stmts, ce),
   blk: (comp, ce) => {
-    const locals = scan(comp.body)
-    instrs[wc++] = { tag: 'ENTER_SCOPE', num: locals.length }
-    compile(
-      comp.body,
-      // extend compile-time environment
-      compile_time_environment_extend(locals, ce)
-    )
-    instrs[wc++] = { tag: 'EXIT_SCOPE' }
+    const locals = scan(comp.body, ce)
+    if (locals.length !== 0) {
+      instrs[wc++] = { tag: 'ENTER_SCOPE', num: locals.length }
+      compile(comp.body, compile_time_environment_extend(locals, ce))
+      instrs[wc++] = { tag: 'EXIT_SCOPE' }
+      return
+    }
+    if (locals.length == 0 && ce.length == 1) {
+      instrs[wc++] = { tag: 'ENTER_SCOPE', num: locals.length }
+      compile(comp.body, compile_time_environment_extend(locals, ce))
+      instrs[wc++] = { tag: 'EXIT_SCOPE' }
+      return
+    }
+    compile(comp.body, compile_time_environment_extend(locals, ce))
   },
 }
 
 // compile component into instruction array instrs,
 // starting at wc (write counter)
 const compile = (comp, ce) => {
-  display('==========')
-  display(comp)
-  display('==========')
   compile_comp[comp.tag](comp, ce)
 }
 
@@ -795,20 +792,6 @@ const microcode = {
   LDC: (instr) => push(OS, JS_value_to_address(instr.val)),
   UNOP: (instr) => push(OS, apply_unop(instr.sym, OS.pop())),
   BINOP: (instr) => push(OS, apply_binop(instr.sym, OS.pop(), OS.pop())),
-  // BINOP: (instr) =>{
-  //   let op1 = OS.pop()
-  //   let op2 = OS.pop()
-  //   let sym = instr.sym
-  //   let result = apply_binop(sym, op1, op2)
-  //   display('op1: ')
-  //   display(address_to_JS_value(op1))
-  //   display('op2: ')
-  //   display(address_to_JS_value(op2))
-  //   display('sym: ')
-  //   display(sym)
-  //   display('result: ')
-  //   display(result)
-  //   push(OS, result)} ,
   POP: (instr) => OS.pop(),
   JOF: (instr) => (PC = is_True(OS.pop()) ? PC : instr.addr),
   // JOF: (instr) => {
@@ -895,15 +878,15 @@ function run() {
   while (!(instrs[PC].tag === 'DONE')) {
     //heap_display()
     //display(PC, "PC: ")
-    display(instrs[PC].tag, 'instr: ')
+    // display(instrs[PC].tag, 'instr: ')
     //print_OS("\noperands:            ");
     //print_RTS("\nRTS:            ");
     const instr = instrs[PC++]
     // display(instrs[PC].tag, "next instruction: ")
     microcode[instr.tag](instr)
   }
-  display(OS, '\nfinal operands:           ')
-  print_OS()
+  // display(OS, '\nfinal operands:           ')
+  // print_OS()
   return address_to_JS_value(peek(OS, 0))
 }
 
@@ -945,21 +928,25 @@ const print_OS = (x) => {
   }
 }
 
-const run_vm = (jsonASTString) => {
-  const json = JSON.parse(jsonASTString)
-  compile_program(json)
-  return run()
-}
-
-let result = run_vm(
-  `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"lit","val":10}]},{"tag":"cond","pred":{"tag":"binop","sym":">","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":0}},"cons":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":3}}]},{"tag":"cond","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":15}},"cons":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]},"alt":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"-","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]}}]},"alt":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"n"}],"expr":[{"tag":"binop","sym":"-","frst":{"tag":"nam","sym":"n"},"scnd":{"tag":"lit","val":1}}]}]}}]}}`
-)
-display(result)
-
-//For connection with VMServer, currently cut to test VM easily
-// const run_vm = (jsonAST) => {//jsonAST是string
-//   const result = 'nice ' + jsonAST
-//   display(JSON.parse(jsonAST))//
-//   return { result }
+// const run_vm = (jsonASTString) => {
+//   const json = JSON.parse(jsonASTString)
+//   compile_program(json)
+//   return run()
 // }
-// module.exports = run_vm
+//for test
+// let result = run_vm(
+//   `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"x"}],"expr":[{"tag":"lit","val":0}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":100}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"j"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"j"},"scnd":{"tag":"lit","val":100}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"x"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"x"},"scnd":{"tag":"nam","sym":"i"}},"scnd":{"tag":"nam","sym":"j"}}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"j"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"j"},"scnd":{"tag":"lit","val":1}}]}]}}},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}}]}]}}},{"tag":"nam","sym":"x"}]}}
+// `
+// )
+// display(result)
+
+// For connection with VMServer, currently cut to test VM easily
+const run_vm = (jsonAST) => {
+  //jsonAST是string
+  const json = JSON.parse(jsonAST)
+  compile_program(json)
+  const result = run()
+  display(result)
+  return { result }
+}
+module.exports = run_vm
