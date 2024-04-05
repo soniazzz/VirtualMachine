@@ -570,6 +570,12 @@ const scan = (comp, ce) => {
       }
     }
     result = temp
+  } else if (['decl'].includes(comp.tag)) {
+    let temp = []
+    for (let i = 0; i < comp.sym.length; i++) {
+      temp.push(comp.sym[i].sym)
+    }
+    result = temp
   } else {
     result = []
   }
@@ -664,6 +670,17 @@ const compile_comp = {
     instrs[wc++] = { tag: 'LDC', val: undefined }
   },
   assmt:
+    // store precomputed position info in ASSIGN instruction
+    (comp, ce) => {
+      for (let i = 0; i < comp.expr.length; i++) {
+        compile(comp.expr[i], ce)
+        instrs[wc++] = {
+          tag: 'ASSIGN',
+          pos: compile_time_environment_position(ce, comp.sym[i].sym),
+        }
+      }
+    },
+  decl:
     // store precomputed position info in ASSIGN instruction
     (comp, ce) => {
       for (let i = 0; i < comp.expr.length; i++) {
