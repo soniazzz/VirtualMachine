@@ -556,7 +556,7 @@ const scan = (comp, ce) => {
   let result
   if (comp.tag === 'seq') {
     result = comp.stmts.reduce((acc, x) => acc.concat(scan(x, ce)), [])
-  } else if (['assmt', 'fun'].includes(comp.tag)) {
+  } else if (['assmt'].includes(comp.tag)) {
     let temp = []
     for (let i = 0; i < comp.sym.length; i++) {
       let flag = false
@@ -576,6 +576,8 @@ const scan = (comp, ce) => {
       temp.push(comp.sym[i].sym)
     }
     result = temp
+  } else if (['fun'].includes(comp.tag)) {
+    result = [comp.sym]
   } else {
     result = []
   }
@@ -691,6 +693,52 @@ const compile_comp = {
         }
       }
     },
+  fundecl:
+    // store precomputed position info in ASSIGN instruction
+    (comp, ce) => {
+      compile(comp.expr, ce)
+      instrs[wc++] = {
+        tag: 'ASSIGN',
+        pos: compile_time_environment_position(ce, comp.sym),
+      }
+    },
+  lam: (comp, ce) => {
+    instrs[wc++] = { tag: 'LDF', arity: comp.arity, addr: wc + 1 }
+    // jump over the body of the lambda expression
+    const goto_instruction = { tag: 'GOTO' }
+    instrs[wc++] = goto_instruction
+    // extend compile-time environment
+    compile(comp.body, compile_time_environment_extend(comp.prms, ce))
+    instrs[wc++] = { tag: 'LDC', val: undefined }
+    instrs[wc++] = { tag: 'RESET' }
+    goto_instruction.addr = wc
+  },
+  ret: (comp, ce) => {
+    compile(comp.expr, ce)
+    if (comp.expr.tag === 'app') {
+      // tail call: turn CALL into TAILCALL
+      instrs[wc - 1].tag = 'TAIL_CALL'
+    } else {
+      instrs[wc++] = { tag: 'RESET' }
+    }
+  },
+  fun: (comp, ce) => {
+    compile(
+      {
+        tag: 'fundecl',
+        sym: comp.sym,
+        expr: { tag: 'lam', prms: comp.prms, body: comp.body },
+      },
+      ce
+    )
+  },
+  app: (comp, ce) => {
+    compile(comp.fun, ce)
+    for (let arg of comp.args) {
+      compile(arg, ce)
+    }
+    instrs[wc++] = { tag: 'CALL', arity: comp.args.length }
+  },
   seq: (comp, ce) => compile_sequence(comp.stmts, ce),
   blk: (comp, ce) => {
     const locals = scan(comp.body, ce)
@@ -945,14 +993,14 @@ const print_OS = (x) => {
   }
 }
 
+// //for test
 // const run_vm = (jsonASTString) => {
 //   const json = JSON.parse(jsonASTString)
 //   compile_program(json)
 //   return run()
 // }
-//for test
 // let result = run_vm(
-//   `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"x"}],"expr":[{"tag":"lit","val":0}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":100}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"j"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"j"},"scnd":{"tag":"lit","val":100}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"assmt","sym":[{"tag":"nam","sym":"x"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"x"},"scnd":{"tag":"nam","sym":"i"}},"scnd":{"tag":"nam","sym":"j"}}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"j"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"j"},"scnd":{"tag":"lit","val":1}}]}]}}},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}}]}]}}},{"tag":"nam","sym":"x"}]}}
+//   `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"add","prms":["a","b"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"a"},"scnd":{"tag":"nam","sym":"b"}}}]}}},{"tag":"fun","sym":"fact","prms":["n"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"app","fun":{"tag":"nam","sym":"factIter"},"args":[{"tag":"nam","sym":"n"},{"tag":"lit","val":1},{"tag":"lit","val":1}]}}]}}},{"tag":"fun","sym":"factIter","prms":["n","i","acc"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"cond","pred":{"tag":"binop","sym":">","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"nam","sym":"n"}},"cons":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"nam","sym":"acc"}}]},"alt":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"app","fun":{"tag":"nam","sym":"factIter"},"args":[{"tag":"nam","sym":"n"},{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}},{"tag":"binop","sym":"*","frst":{"tag":"nam","sym":"acc"},"scnd":{"tag":"nam","sym":"i"}}]}}]}}]}}},{"tag":"decl","sym":[{"tag":"nam","sym":"result"}],"expr":[{"tag":"app","fun":{"tag":"nam","sym":"fact"},"args":[{"tag":"lit","val":4}]}]}]}}
 // `
 // )
 // display(result)
