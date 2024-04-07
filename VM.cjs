@@ -599,6 +599,14 @@ let wc
 let instrs
 
 const compile_comp = {
+  //display for fmt.println
+  display: (comp, ce) => {
+    for (let i = 0; i < comp.content.length; i++) {
+      display(comp.content[i])
+      compile(comp.content[i], ce)
+    }
+    instrs[wc++] = { tag: 'DISPLAY', num: comp.content.length }
+  },
   lit: (comp, ce) => {
     instrs[wc++] = { tag: 'LDC', val: comp.val }
   },
@@ -931,6 +939,14 @@ const microcode = {
       E = heap_get_Callframe_environment(top_frame)
     }
   },
+  DISPLAY: (instr) => {
+    const num = instr.num
+    const values = []
+    for (let i = 0; i < num; i++) {
+      values.push(OS.pop())
+    }
+    display(values.map(address_to_JS_value).reverse())
+  },
 }
 
 function run() {
@@ -993,25 +1009,25 @@ const print_OS = (x) => {
   }
 }
 
-// //for test
-// const run_vm = (jsonASTString) => {
-//   const json = JSON.parse(jsonASTString)
-//   compile_program(json)
-//   return run()
-// }
-// let result = run_vm(
-//   `{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"add","prms":["a","b"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"a"},"scnd":{"tag":"nam","sym":"b"}}}]}}},{"tag":"fun","sym":"fact","prms":["n"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"app","fun":{"tag":"nam","sym":"factIter"},"args":[{"tag":"nam","sym":"n"},{"tag":"lit","val":1},{"tag":"lit","val":1}]}}]}}},{"tag":"fun","sym":"factIter","prms":["n","i","acc"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"cond","pred":{"tag":"binop","sym":">","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"nam","sym":"n"}},"cons":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"nam","sym":"acc"}}]},"alt":{"tag":"seq","stmts":[{"tag":"ret","expr":{"tag":"app","fun":{"tag":"nam","sym":"factIter"},"args":[{"tag":"nam","sym":"n"},{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}},{"tag":"binop","sym":"*","frst":{"tag":"nam","sym":"acc"},"scnd":{"tag":"nam","sym":"i"}}]}}]}}]}}},{"tag":"decl","sym":[{"tag":"nam","sym":"result"}],"expr":[{"tag":"app","fun":{"tag":"nam","sym":"fact"},"args":[{"tag":"lit","val":4}]}]}]}}
-// `
-// )
-// display(result)
-
-// For connection with VMServer, currently cut to test VM easily
-const run_vm = (jsonAST) => {
-  //jsonAST是string
-  const json = JSON.parse(jsonAST)
+//for test
+const run_vm = (jsonASTString) => {
+  const json = JSON.parse(jsonASTString)
   compile_program(json)
-  const result = run()
-  display(result)
-  return { result }
+  return run()
 }
-module.exports = run_vm
+let result = run_vm(
+  `
+`
+)
+display(result)
+
+// // For connection with VMServer, currently cut to test VM easily
+// const run_vm = (jsonAST) => {
+//   //jsonAST是string
+//   const json = JSON.parse(jsonAST)
+//   compile_program(json)
+//   const result = run()
+//   display(result)
+//   return { result }
+// }
+// module.exports = run_vm
