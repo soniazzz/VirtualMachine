@@ -599,10 +599,28 @@ let wc
 let instrs
 
 const compile_comp = {
+  gostmt: (comp, ce) => {
+    // Compile the body of the goroutine
+    // compile(comp.callbody, ce)
+    // Create a new closure for the goroutine
+    instrs[wc++] = { tag: 'LDF', arity: 0, addr: wc + 1 }
+    // Jump over the body of the closure
+    const goto_instruction = { tag: 'GOTO' }
+    instrs[wc++] = goto_instruction
+    // Compile the body of the closure
+    compile(comp.callbody, ce)
+    instrs[wc++] = { tag: 'LDC', val: undefined }
+    // instrs[wc++] = { tag: 'RESET' }
+    instrs[wc++] = { tag: 'ENDTHREAD' }
+    goto_instruction.addr = wc
+    // Start a new thread with the closure
+    instrs[wc++] = { tag: 'STARTTHREAD' }
+  },
   //display for fmt.println
   display: (comp, ce) => {
     for (let i = 0; i < comp.content.length; i++) {
-      display(comp.content[i])
+      // display("++++++++++++++++++")
+      // display(comp.content[i])
       compile(comp.content[i], ce)
     }
     instrs[wc++] = { tag: 'DISPLAY', num: comp.content.length }
@@ -867,12 +885,6 @@ const microcode = {
   BINOP: (instr) => push(OS, apply_binop(instr.sym, OS.pop(), OS.pop())),
   POP: (instr) => OS.pop(),
   JOF: (instr) => (PC = is_True(OS.pop()) ? PC : instr.addr),
-  // JOF: (instr) => {
-  //   display("haha")
-  //   print_OS()
-  //   let result=is_True(OS.pop())
-  //   display(result)
-  //   PC = result ? PC : instr.addr},
   GOTO: (instr) => (PC = instr.addr),
   ENTER_SCOPE: (instr) => {
     push(RTS, heap_allocate_Blockframe(E))
@@ -945,32 +957,192 @@ const microcode = {
     for (let i = 0; i < num; i++) {
       values.push(OS.pop())
     }
+    display("=================================")
     display(values.map(address_to_JS_value).reverse())
+  },
+  STARTTHREAD: (instr) => {
+    const closure = OS.pop()
+    const newOS = []
+    const newE = E
+    const newRTS = []
+    const newPC = heap_get_Closure_pc(closure)
+    const newThread = new Thread(newOS, newE, newRTS, newPC)
+    newThread.isRunning=true
+    threadQueue.push(newThread)
+  },
+  ENDTHREAD:(instr) => {
+  },
+  SIGNAL: (instr, thread) => {
+    const x = instr.x
+    const value = heap_deref(thread.e, x) + 1
+    heap_update(thread.e, x, value)
+  },
+
+  WAIT: (instr, thread) => {
+    const x = instr.x
+    const value = heap_deref(thread.e, x)
+    if (value > 0) {
+      heap_update(thread.e, x, value - 1)
+    } else {
+      thread.pc-- // Busy waiting
+    }
   },
 }
 
-function run() {
-  OS = []
-  PC = 0
-  E = global_environment
-  RTS = []
-  stringPool = {} // ADDED CHANGE
-  //print_code()
-  while (!(instrs[PC].tag === 'DONE')) {
-    //heap_display()
-    //display(PC, "PC: ")
-    // display(instrs[PC].tag, 'instr: ')
-    //print_OS("\noperands:            ");
-    //print_RTS("\nRTS:            ");
-    const instr = instrs[PC++]
-    // display(instrs[PC].tag, "next instruction: ")
-    microcode[instr.tag](instr)
+class Thread {
+  constructor(os, e, rts, pc) {
+    this.os = os
+    this.e = e
+    this.rts = rts
+    this.pc = pc
+    this.isRunning = false
   }
-  // display(OS, '\nfinal operands:           ')
-  // print_OS()
-  return address_to_JS_value(peek(OS, 0))
+
+  saveContext() {
+    this.os = [...OS]
+    this.e = E
+    this.rts = [...RTS]
+    this.pc = PC
+  }
 }
 
+const threadQueue = []
+const timeSlice = 10 // Number of instructions to execute per thread
+
+//run the main thread
+async function run() {
+  stringPool = {}
+  // Create the main goroutine
+  const mainThread = new Thread([], global_environment, [], 0)
+  mainThread.isRunning=true
+  threadQueue.push(mainThread)
+
+
+  while (threadQueue.length > 0) {
+    let instructionCount = 0
+    //把排到的thread拿出来
+    const currentThread = threadQueue.shift()
+    //OS,PC,E,RTS 总是暂存正在用的thread的环境
+    OS = currentThread.os
+    PC = currentThread.pc
+    E = currentThread.e
+    RTS = currentThread.rts
+
+    while (
+      instructionCount < timeSlice &&
+      currentThread.isRunning &&
+      !(
+        instrs[PC].tag === 'DONE' ||
+        instrs[PC].tag === 'ENDTHREAD'
+      )
+    ) {
+      //跑mainthread的function
+      const instr = instrs[PC++]
+      // display("Current instruction")
+      // display(instructionCount)
+      // display(instr)
+      // display(RTS)
+      // display(OS)
+      // display(E)
+      // display(PC)
+      await microcode[instr.tag](instr)
+      instructionCount++
+    }
+    if (instrs[PC].tag === 'DONE' || instrs[PC].tag === 'ENDTHREAD'){
+      currentThread.isRunning=false
+    }
+      if (currentThread.isRunning) {
+        // display('====================')
+        currentThread.saveContext()
+        threadQueue.push(currentThread)
+      }
+  }
+
+  return address_to_JS_value(peek(mainThread.os, 0))
+}
+const heap_update = (address, offset, value) => {
+  if (offset === 0) {
+    throw new Error('Cannot update the tag of a heap object')
+  }
+  const tagValue = heap_get_tag(address)
+  switch (tagValue) {
+    case Number_tag:
+      if (offset === 1) {
+        heap_set(address + 1, value)
+      } else {
+        throw new Error('Invalid offset for Number node')
+      }
+      break
+    case Pair_tag:
+      if (offset === 1 || offset === 2) {
+        heap_set_child(address, offset - 1, value)
+      } else {
+        throw new Error('Invalid offset for Pair node')
+      }
+      break
+    case Closure_tag:
+      if (offset === 1) {
+        heap_set_byte_at_offset(address, 1, value)
+      } else if (offset === 2) {
+        heap_set_2_bytes_at_offset(address, 2, value)
+      } else if (offset === 3) {
+        heap_set_child(address, 0, value)
+      } else {
+        throw new Error('Invalid offset for Closure node')
+      }
+      break
+    case Frame_tag:
+    case Environment_tag:
+      if (offset > 0 && offset <= heap_get_number_of_children(address)) {
+        heap_set_child(address, offset - 1, value)
+      } else {
+        throw new Error('Invalid offset for Frame or Environment node')
+      }
+      break
+    default:
+      throw new Error('Unsupported node type for heap_update')
+  }
+}
+
+const heap_deref = (address, offset) => {
+  if (offset === 0) {
+    return heap_get_tag(address)
+  }
+  const tagValue = heap_get_tag(address)
+  switch (tagValue) {
+    case Number_tag:
+      if (offset === 1) {
+        return heap_get(address + 1)
+      } else {
+        throw new Error('Invalid offset for Number node')
+      }
+    case Pair_tag:
+      if (offset === 1 || offset === 2) {
+        return heap_get_child(address, offset - 1)
+      } else {
+        throw new Error('Invalid offset for Pair node')
+      }
+    case Closure_tag:
+      if (offset === 1) {
+        return heap_get_Closure_arity(address)
+      } else if (offset === 2) {
+        return heap_get_Closure_pc(address)
+      } else if (offset === 3) {
+        return heap_get_Closure_environment(address)
+      } else {
+        throw new Error('Invalid offset for Closure node')
+      }
+    case Frame_tag:
+    case Environment_tag:
+      if (offset > 0 && offset <= heap_get_number_of_children(address)) {
+        return heap_get_child(address, offset - 1)
+      } else {
+        throw new Error('Invalid offset for Frame or Environment node')
+      }
+    default:
+      throw new Error('Unsupported node type for heap_deref')
+  }
+}
 // debugging
 
 const print_code = () => {
@@ -1017,6 +1189,7 @@ const run_vm = (jsonASTString) => {
 }
 let result = run_vm(
   `
+{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"f","prms":["from"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":3}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"display","content":[{"tag":"nam","sym":"from"},{"tag":"lit","val":":"},{"tag":"nam","sym":"i"}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}}]}]}}}]}}},{"tag":"app","fun":{"tag":"nam","sym":"f"},"args":[{"tag":"lit","val":"direct"}]},{"tag":"gostmt","callbody":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"app","fun":{"tag":"nam","sym":"f"},"args":[{"tag":"lit","val":"goroutine"}]}]}}},{"tag":"gostmt","callbody":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"gofun","prms":["msg"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"display","content":[{"tag":"nam","sym":"msg"}]}]}}},{"tag":"app","fun":{"tag":"nam","sym":"gofun"},"args":[{"tag":"lit","val":"going"}]}]}}},{"tag":"display","content":[{"tag":"lit","val":"done"}]}]}}
 `
 )
 display(result)
