@@ -1014,7 +1014,8 @@ const microcode = {
     for (let i = 0; i < num; i++) {
       values.push(OS.pop())
     }
-    display(values.map(address_to_JS_value).reverse())
+    // display(values.map(address_to_JS_value).reverse())
+    result.push(values.map(address_to_JS_value).reverse())
   },
   STARTTHREAD: (instr) => {
     const closure = OS.pop()
@@ -1088,6 +1089,7 @@ const timeSlice = 10 // Number of instructions to execute per thread
 //run the main thread
 async function run() {
   stringPool = {}
+  result=[]
   // Create the main goroutine
   const mainThread = new Thread([], global_environment, [], 0)
   mainThread.isRunning = true
@@ -1193,7 +1195,7 @@ async function run() {
       }
     }
   }
-  return address_to_JS_value(peek(mainThread.os, 0))
+  // return address_to_JS_value(peek(mainThread.os, 0))
 }
 
 // debugging
@@ -1236,18 +1238,21 @@ const print_OS = (x) => {
   }
 }
 
-//for test
-const run_vm = (jsonASTString) => {
-  const json = JSON.parse(jsonASTString)
-  compile_program(json)
-  return run()
-}
-let result = run_vm(
-  `
-  {"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"ch"}],"expr":[{"tag":"makechannel"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"hello"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"world"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]}]}}
-`
-)
-display(result)
+// //for test
+// const run_vm = (jsonASTString) => {
+//   const json = JSON.parse(jsonASTString)
+//   compile_program(json)
+//   return run()
+// }
+// let result = run_vm(
+//   `
+//   {"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"ch"}],"expr":[{"tag":"makechannel"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"hello"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"world"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]}]}}
+// `
+// )
+// display(result)
+
+
+//Original Edition
 // // For connection with VMServer, currently cut to test VM easily
 // const run_vm = (jsonAST) => {
 //   //jsonAST是string
@@ -1258,3 +1263,26 @@ display(result)
 //   return { result }
 // }
 // module.exports = run_vm
+
+
+
+// For connection with VMServer, currently cut to test VM easily
+let result = []
+const run_vm = async (jsonAST) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const json = JSON.parse(jsonAST)
+      compile_program(json)
+      run()
+        .then(() => {
+          resolve({ result: result })
+        })
+        .catch((error) => {
+          reject(error)
+        })
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+module.exports = run_vm
