@@ -576,7 +576,7 @@ const scan = (comp, ce) => {
       temp.push(comp.sym[i].sym)
     }
     result = temp
-  } else if (['fun'].includes(comp.tag)) {
+  } else if (['fun', 'waitgroupdecl'].includes(comp.tag)) {
     result = [comp.sym]
   } else {
     result = []
@@ -610,10 +610,8 @@ const compile_comp = {
     // Compile the body of the closure
     compile(comp.callbody, ce)
     instrs[wc++] = { tag: 'LDC', val: undefined }
-    // instrs[wc++] = { tag: 'RESET' }
     instrs[wc++] = { tag: 'ENDTHREAD' }
     goto_instruction.addr = wc
-    // Start a new thread with the closure
     instrs[wc++] = { tag: 'STARTTHREAD' }
   },
   //display for fmt.println
@@ -781,6 +779,31 @@ const compile_comp = {
       return
     }
     compile(comp.body, compile_time_environment_extend(locals, ce))
+  },
+  waitgroupdecl: (comp, ce) => {
+    instrs[wc++] = {
+      tag: 'WAITGROUPDECL',
+      sym: comp.sym,
+      pos: compile_time_environment_position(ce, comp.sym),
+    }
+  },
+  deferStmt: (comp, ce) => {
+    //set automatically decrement the counter once a go routine is ended
+  },
+  addwait: (comp, ce) => {
+    compile(comp.val, ce)
+    instrs[wc++] = {
+      tag: 'WAITGROUPADD',
+      sym: comp.sym.sym,
+      pos: compile_time_environment_position(ce, comp.sym.sym),
+    }
+  },
+  wait: (comp, ce) => {
+    instrs[wc++] = {
+      tag: 'WAIT',
+      sym: comp.sym.sym,
+      pos: compile_time_environment_position(ce, comp.sym.sym),
+    }
   },
 }
 
@@ -957,7 +980,6 @@ const microcode = {
     for (let i = 0; i < num; i++) {
       values.push(OS.pop())
     }
-    display("=================================")
     display(values.map(address_to_JS_value).reverse())
   },
   STARTTHREAD: (instr) => {
@@ -967,28 +989,33 @@ const microcode = {
     const newRTS = []
     const newPC = heap_get_Closure_pc(closure)
     const newThread = new Thread(newOS, newE, newRTS, newPC)
-    newThread.isRunning=true
+    newThread.isRunning = true
+    if (WAIT_GROUP_POS.length != 0) {
+      newThread.waitgroup_pos = WAIT_GROUP_POS.pop()
+    }
     threadQueue.push(newThread)
   },
-  ENDTHREAD:(instr) => {
+  WAITGROUPDECL: (instr) => {
+    update_global_E(instr.pos, JS_value_to_address(0))
   },
-  SIGNAL: (instr, thread) => {
-    const x = instr.x
-    const value = heap_deref(thread.e, x) + 1
-    heap_update(thread.e, x, value)
-  },
-
-  WAIT: (instr, thread) => {
-    const x = instr.x
-    const value = heap_deref(thread.e, x)
-    if (value > 0) {
-      heap_update(thread.e, x, value - 1)
-    } else {
-      thread.pc-- // Busy waiting
+  WAITGROUPADD: (instr) => {
+    //开一个新的位置等人拿
+    const add_delta = OS.pop()
+    for (let i=0;i<address_to_JS_value(add_delta);i++){
+      WAIT_GROUP_POS.push(instr.pos)
     }
+    const original_counter = heap_get_Environment_value(E, instr.pos)
+    const new_counter = apply_binop('+', add_delta, original_counter)
+    update_global_E(instr.pos, new_counter)
   },
 }
-
+function update_global_E(pos, value) {
+  for (let i = 0; i < threadQueue.length; i++) {
+    const env = threadQueue[i].e
+    heap_set_Environment_value(env, pos, value)
+  }
+  heap_set_Environment_value(E, pos, value)
+}
 class Thread {
   constructor(os, e, rts, pc) {
     this.os = os
@@ -996,6 +1023,7 @@ class Thread {
     this.rts = rts
     this.pc = pc
     this.isRunning = false
+    this.waitgroup_pos = null
   }
 
   saveContext() {
@@ -1005,8 +1033,9 @@ class Thread {
     this.pc = PC
   }
 }
-
-const threadQueue = []
+let WAIT_GROUP_POS = []
+const waited_thread_queue = []
+let threadQueue = []
 const timeSlice = 10 // Number of instructions to execute per thread
 
 //run the main thread
@@ -1014,14 +1043,21 @@ async function run() {
   stringPool = {}
   // Create the main goroutine
   const mainThread = new Thread([], global_environment, [], 0)
-  mainThread.isRunning=true
+  mainThread.isRunning = true
   threadQueue.push(mainThread)
-
 
   while (threadQueue.length > 0) {
     let instructionCount = 0
+    let currentThread
+    let from_waited_queue = false
+    if (waited_thread_queue.length > 0) {
+      // Prioritize threads in the waited_thread_queue
+      currentThread = waited_thread_queue.shift()
+      from_waited_queue = true
+    } else {
+      currentThread = threadQueue.shift()
+    }
     //把排到的thread拿出来
-    const currentThread = threadQueue.shift()
     //OS,PC,E,RTS 总是暂存正在用的thread的环境
     OS = currentThread.os
     PC = currentThread.pc
@@ -1031,14 +1067,12 @@ async function run() {
     while (
       instructionCount < timeSlice &&
       currentThread.isRunning &&
-      !(
-        instrs[PC].tag === 'DONE' ||
-        instrs[PC].tag === 'ENDTHREAD'
-      )
+      !(instrs[PC].tag === 'DONE' || instrs[PC].tag === 'ENDTHREAD') &&
+      !(instrs[PC].tag === 'WAIT')
     ) {
       //跑mainthread的function
       const instr = instrs[PC++]
-      // display("Current instruction")
+      // display('=============Current instruction=============')
       // display(instructionCount)
       // display(instr)
       // display(RTS)
@@ -1048,106 +1082,71 @@ async function run() {
       await microcode[instr.tag](instr)
       instructionCount++
     }
-    if (instrs[PC].tag === 'DONE' || instrs[PC].tag === 'ENDTHREAD'){
-      currentThread.isRunning=false
+    //check next instruction which is not actually run in microcode since they have to modify the current thread
+    if (instrs[PC].tag === 'ENDTHREAD') {
+      currentThread.isRunning = false
+      //decrease the wait group counter globally
+      const original_counter = heap_get_Environment_value(
+        E,
+        currentThread.waitgroup_pos
+      )
+      const new_counter = apply_binop(
+        '-',
+        original_counter,
+        JS_value_to_address(1)
+      )
+      update_global_E(currentThread.waitgroup_pos, new_counter)
+
+      currentThread.waitgroup_pos = null
+      threadQueue = threadQueue.filter((thread) => thread.isRunning)
+
     }
-      if (currentThread.isRunning) {
-        // display('====================')
-        currentThread.saveContext()
+    if (instrs[PC].tag === 'DONE') {
+      currentThread.isRunning = false
+      threadQueue.splice(0, threadQueue.length)
+    }
+    if (instrs[PC].tag === 'WAIT') {
+      const counter_value = address_to_JS_value(
+        heap_get_Environment_value(E, instrs[PC].pos)
+      )
+      if (
+        JSON.stringify(currentThread.waitgroup_pos) ==
+        JSON.stringify(instrs[PC].pos)
+      ) {
+        waited_thread_queue.push(currentThread)
+      }
+      if (counter_value != 0) {
+        for (let i = 0; i < threadQueue.length; i++) {
+          if (
+            JSON.stringify(threadQueue[i].waitgroup_pos) ==
+            JSON.stringify(instrs[PC].pos)
+          ) {
+            waited_thread_queue.push(threadQueue[i])
+          }
+        }
+      }
+
+      PC++
+    }
+    if (currentThread.isRunning) {
+      currentThread.saveContext()
+      if (from_waited_queue == true) {
+        waited_thread_queue.push(currentThread)
+      } else {
         threadQueue.push(currentThread)
       }
+    }
   }
-
   return address_to_JS_value(peek(mainThread.os, 0))
 }
-const heap_update = (address, offset, value) => {
-  if (offset === 0) {
-    throw new Error('Cannot update the tag of a heap object')
-  }
-  const tagValue = heap_get_tag(address)
-  switch (tagValue) {
-    case Number_tag:
-      if (offset === 1) {
-        heap_set(address + 1, value)
-      } else {
-        throw new Error('Invalid offset for Number node')
-      }
-      break
-    case Pair_tag:
-      if (offset === 1 || offset === 2) {
-        heap_set_child(address, offset - 1, value)
-      } else {
-        throw new Error('Invalid offset for Pair node')
-      }
-      break
-    case Closure_tag:
-      if (offset === 1) {
-        heap_set_byte_at_offset(address, 1, value)
-      } else if (offset === 2) {
-        heap_set_2_bytes_at_offset(address, 2, value)
-      } else if (offset === 3) {
-        heap_set_child(address, 0, value)
-      } else {
-        throw new Error('Invalid offset for Closure node')
-      }
-      break
-    case Frame_tag:
-    case Environment_tag:
-      if (offset > 0 && offset <= heap_get_number_of_children(address)) {
-        heap_set_child(address, offset - 1, value)
-      } else {
-        throw new Error('Invalid offset for Frame or Environment node')
-      }
-      break
-    default:
-      throw new Error('Unsupported node type for heap_update')
-  }
-}
 
-const heap_deref = (address, offset) => {
-  if (offset === 0) {
-    return heap_get_tag(address)
-  }
-  const tagValue = heap_get_tag(address)
-  switch (tagValue) {
-    case Number_tag:
-      if (offset === 1) {
-        return heap_get(address + 1)
-      } else {
-        throw new Error('Invalid offset for Number node')
-      }
-    case Pair_tag:
-      if (offset === 1 || offset === 2) {
-        return heap_get_child(address, offset - 1)
-      } else {
-        throw new Error('Invalid offset for Pair node')
-      }
-    case Closure_tag:
-      if (offset === 1) {
-        return heap_get_Closure_arity(address)
-      } else if (offset === 2) {
-        return heap_get_Closure_pc(address)
-      } else if (offset === 3) {
-        return heap_get_Closure_environment(address)
-      } else {
-        throw new Error('Invalid offset for Closure node')
-      }
-    case Frame_tag:
-    case Environment_tag:
-      if (offset > 0 && offset <= heap_get_number_of_children(address)) {
-        return heap_get_child(address, offset - 1)
-      } else {
-        throw new Error('Invalid offset for Frame or Environment node')
-      }
-    default:
-      throw new Error('Unsupported node type for heap_deref')
-  }
-}
 // debugging
 
 const print_code = () => {
   for (let i = 0; i < instrs.length; i = i + 1) {
     const instr = instrs[i]
+    // display(i)
+    // display(instr)
     display(
       '',
       stringify(i) +
@@ -1189,7 +1188,6 @@ const run_vm = (jsonASTString) => {
 }
 let result = run_vm(
   `
-{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"f","prms":["from"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"lit","val":0}]},{"tag":"for","pred":{"tag":"binop","sym":"<","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":3}},"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"display","content":[{"tag":"nam","sym":"from"},{"tag":"lit","val":":"},{"tag":"nam","sym":"i"}]},{"tag":"assmt","sym":[{"tag":"nam","sym":"i"}],"expr":[{"tag":"binop","sym":"+","frst":{"tag":"nam","sym":"i"},"scnd":{"tag":"lit","val":1}}]}]}}}]}}},{"tag":"app","fun":{"tag":"nam","sym":"f"},"args":[{"tag":"lit","val":"direct"}]},{"tag":"gostmt","callbody":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"app","fun":{"tag":"nam","sym":"f"},"args":[{"tag":"lit","val":"goroutine"}]}]}}},{"tag":"gostmt","callbody":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"fun","sym":"gofun","prms":["msg"],"body":{"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"display","content":[{"tag":"nam","sym":"msg"}]}]}}},{"tag":"app","fun":{"tag":"nam","sym":"gofun"},"args":[{"tag":"lit","val":"going"}]}]}}},{"tag":"display","content":[{"tag":"lit","val":"done"}]}]}}
 `
 )
 display(result)
