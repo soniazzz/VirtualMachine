@@ -472,7 +472,7 @@ const value_index = (frame, x) => {
 // in this machine, the builtins take their
 // arguments directly from the operand stack,
 // to save the creation of an intermediate
-// argument array
+// argument array 
 const builtin_object = {
   display: () => {
     const address = OS.pop()
@@ -599,30 +599,6 @@ let wc
 let instrs
 
 const compile_comp = {
-  gostmt: (comp, ce) => {
-    // Compile the body of the goroutine
-    // compile(comp.callbody, ce)
-    // Create a new closure for the goroutine
-    instrs[wc++] = { tag: 'LDF', arity: 0, addr: wc + 1 }
-    // Jump over the body of the closure
-    const goto_instruction = { tag: 'GOTO' }
-    instrs[wc++] = goto_instruction
-    // Compile the body of the closure
-    compile(comp.callbody, ce)
-    instrs[wc++] = { tag: 'LDC', val: undefined }
-    instrs[wc++] = { tag: 'ENDTHREAD' }
-    goto_instruction.addr = wc
-    instrs[wc++] = { tag: 'STARTTHREAD' }
-  },
-  //display for fmt.println
-  display: (comp, ce) => {
-    for (let i = 0; i < comp.content.length; i++) {
-      // display("++++++++++++++++++")
-      // display(comp.content[i])
-      compile(comp.content[i], ce)
-    }
-    instrs[wc++] = { tag: 'DISPLAY', num: comp.content.length }
-  },
   lit: (comp, ce) => {
     instrs[wc++] = { tag: 'LDC', val: comp.val }
   },
@@ -804,6 +780,64 @@ const compile_comp = {
       sym: comp.sym.sym,
       pos: compile_time_environment_position(ce, comp.sym.sym),
     }
+  },
+  makechannel: (comp, ce) => {
+    instrs[wc++] = { tag: 'MAKECHANNEL' }
+  },
+  send: (comp, ce) => {
+    compile(comp.val, ce)
+    let pos = []
+    for (let i = 1; i < ce.length; i++) {
+      for (let j = 0; j < ce[i].length; j++) {
+        if (ce[i][j] == comp.chan) {
+          pos.push([i, j])
+        }
+      }
+    }
+    instrs[wc++] = {
+      tag: 'SEND',
+      chan: comp.chan,
+      pos: pos.shift(),
+    }
+  },
+  receive: (comp, ce) => {
+    let pos = []
+    for (let i = 1; i < ce.length; i++) {
+      for (let j = 0; j < ce[i].length; j++) {
+        if (ce[i][j] == comp.chan) {
+          pos.push([i, j])
+        }
+      }
+    }
+    instrs[wc++] = {
+      tag: 'RECEIVE',
+      chan: comp.chan,
+      pos: pos.shift(),
+    }
+  },
+  gostmt: (comp, ce) => {
+    // Compile the body of the goroutine
+    // compile(comp.callbody, ce)
+    // Create a new closure for the goroutine
+    instrs[wc++] = { tag: 'LDF', arity: 0, addr: wc + 1 }
+    // Jump over the body of the closure
+    const goto_instruction = { tag: 'GOTO' }
+    instrs[wc++] = goto_instruction
+    // Compile the body of the closure
+    compile(comp.callbody, ce)
+    instrs[wc++] = { tag: 'LDC', val: undefined }
+    instrs[wc++] = { tag: 'ENDTHREAD' }
+    goto_instruction.addr = wc
+    instrs[wc++] = { tag: 'STARTTHREAD' }
+  },
+  //display for fmt.println
+  display: (comp, ce) => {
+    for (let i = 0; i < comp.content.length; i++) {
+      // display("++++++++++++++++++")
+      // display(comp.content[i])
+      compile(comp.content[i], ce)
+    }
+    instrs[wc++] = { tag: 'DISPLAY', num: comp.content.length }
   },
 }
 
@@ -1001,12 +1035,25 @@ const microcode = {
   WAITGROUPADD: (instr) => {
     //开一个新的位置等人拿
     const add_delta = OS.pop()
-    for (let i=0;i<address_to_JS_value(add_delta);i++){
+    for (let i = 0; i < address_to_JS_value(add_delta); i++) {
       WAIT_GROUP_POS.push(instr.pos)
     }
     const original_counter = heap_get_Environment_value(E, instr.pos)
     const new_counter = apply_binop('+', add_delta, original_counter)
     update_global_E(instr.pos, new_counter)
+  },
+  MAKECHANNEL: (instr) => {
+    push(OS, JS_value_to_address(undefined))
+  },
+
+  SEND: (instr) => {
+    const value = OS.pop()
+    update_global_E(instr.pos, value)
+  },
+
+  RECEIVE: (instr) => {
+    const val = heap_get_Environment_value(E, instr.pos)
+    push(OS, val)
   },
 }
 function update_global_E(pos, value) {
@@ -1081,6 +1128,15 @@ async function run() {
       // display(PC)
       await microcode[instr.tag](instr)
       instructionCount++
+      //next instruction is receive
+      if (instrs[PC].tag === 'RECEIVE'){
+        const current_value_in_channel = address_to_JS_value(heap_get_Environment_value(E, instrs[PC].pos))
+        if (current_value_in_channel==undefined){
+          PC--
+          break;
+        }
+      }
+
     }
     //check next instruction which is not actually run in microcode since they have to modify the current thread
     if (instrs[PC].tag === 'ENDTHREAD') {
@@ -1188,10 +1244,10 @@ const run_vm = (jsonASTString) => {
 }
 let result = run_vm(
   `
+  {"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"ch"}],"expr":[{"tag":"makechannel"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"hello"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"world"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]}]}}
 `
 )
 display(result)
-
 // // For connection with VMServer, currently cut to test VM easily
 // const run_vm = (jsonAST) => {
 //   //jsonAST是string
