@@ -1056,7 +1056,6 @@ const compile_comp = {
 // compile component into instruction array instrs,
 // starting at wc (write counter)
 const compile = (comp, ce) => {
-  display(comp)
   compile_comp[comp.tag](comp, ce)
 }
 
@@ -1067,8 +1066,29 @@ const compile_program = (program) => {
   instrs = []
   compile(program, global_compile_environment)
   instrs[wc] = { tag: 'DONE' }
+  // print_code()
 }
-
+const print_code = () => {
+  for (let i = 0; i < instrs.length; i = i + 1) {
+    const instr = instrs[i]
+    // display(i)
+    // display(instr)
+    display(
+      '',
+      stringify(i) +
+        ': ' +
+        instr.tag +
+        ' ' +
+        (instr.tag === 'GOTO' ? stringify(instr.addr) : '') +
+        (instr.tag === 'ENTER_SCOPE' ? stringify(instr.num) : '') +
+        (instr.tag === 'LDC' ? stringify(instr.val) : '') +
+        (instr.tag === 'ASSIGN' ? stringify(instr.pos) : '') +
+        (instr.tag === 'LD' ? stringify(instr.pos) : '') +
+        (instr.tag === 'BINOP' ? stringify(instr.sym) : '') +
+        (instr.tag === 'JOF' ? stringify(instr.addr) : '')
+    )
+  }
+}
 // **********************
 // operators and builtins
 // **********************/
@@ -1261,13 +1281,24 @@ const microcode = {
   },
 
   SEND: (instr) => {
-    const value = OS.pop()
-    update_global_E(instr.pos, value)
+    //If enter by coincidence, return to last PC which next PC is SEND
+    if (!SenderReady || !ReceiverReady) {
+      PC = PC - 2
+      return
+    }
+    update_global_E(instr.pos, instr.val)
   },
 
   RECEIVE: (instr) => {
+    //If enter by coincidence, return to last PC which next PC is Receive
+    if ((!SenderReady)||(!ReceiverReady)){
+     PC=PC-2
+     return
+    }
     const val = heap_get_Environment_value(E, instr.pos)
     push(OS, val)
+    ReceiverReady=false
+    SenderReady=false
   },
 }
 
@@ -1279,7 +1310,6 @@ function initialize_machine(heapsize_words) {
   OS = []
   PC = 0
   RTS = []
-  // modified
   ALLOCATING = []
   HEAP_BOTTOM = undefined
 
@@ -1293,7 +1323,6 @@ function initialize_machine(heapsize_words) {
   free = 0
   PC = 0
   allocate_literal_values()
-  // heap_allocate_String()
   const builtins_frame = allocate_builtin_frame()
   const constants_frame = allocate_constant_frame()
   E = heap_allocate_Environment(0)
@@ -1325,6 +1354,9 @@ function update_global_E(pos, value) {
   }
   heap_set_Environment_value(E, pos, value)
 }
+
+let SenderReady=false
+let ReceiverReady=false
 let WAIT_GROUP_POS = []
 const waited_thread_queue = []
 let threadQueue = []
@@ -1368,6 +1400,18 @@ async function run() {
       instructionCount++
       //next instruction is receive
       if (instrs[PC].tag === 'RECEIVE') {
+        //if it is the only thread currently and receiving is before sending, stop running and give error
+        if ((waited_thread_queue.length==0)&&(threadQueue.length==0)&&(!SenderReady)){
+         result.push(['fatal error: all goroutines are asleep - deadlock!'])
+         currentThread.isRunning = false
+         threadQueue.splice(0, threadQueue.length)
+         break
+        }
+        ReceiverReady=true
+        if (!SenderReady){
+         PC--
+         break
+        }
         const current_value_in_channel = address_to_JS_value(
           heap_get_Environment_value(E, instrs[PC].pos)
         )
@@ -1375,6 +1419,24 @@ async function run() {
           PC--
           break
         }
+      }
+      //next instruction is send
+      // will not execute until next receive exist
+      if (instrs[PC].tag === 'SEND') {
+       SenderReady = true
+       const value = OS.pop()
+       instrs[PC].val = value
+       //Currently main go routine is the only routine and sending is before receiving, stop running and give error
+       if ((waited_thread_queue.length==0)&&(threadQueue.length==0)&&(!ReceiverReady)){
+         result.push(['fatal error: all goroutines are asleep - deadlock!'])
+         currentThread.isRunning = false
+         threadQueue.splice(0, threadQueue.length)
+         break
+        }
+       if (!ReceiverReady){
+        PC--
+        break
+       }
       }
     }
     //check next instruction which is not actually run in microcode since they have to modify the current thread
