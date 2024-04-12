@@ -1,4 +1,5 @@
-const run_vm=require('./VM.cjs')
+// const run_vm=require('./VM.cjs')
+const run_vm = require('./VMwithGC.cjs')
 const express = require('express')
 const cors = require('cors')
 

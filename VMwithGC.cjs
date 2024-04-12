@@ -5,6 +5,7 @@ Object.entries(require('sicp')).forEach(
 )
 
 const push = (array, ...items) => {
+  // fixed by Liew Zhao Wei, see Discussion 5
   for (let item of items) {
     array.push(item)
   }
@@ -15,36 +16,156 @@ const push = (array, ...items) => {
 // without changing the array
 const peek = (array, address) => array.slice(-1 - address)[0]
 
-/* *************************
- * HEAP
- * *************************/
+// *************
+// parse to JSON
+// *************/
+
+const list_to_array = (xs) =>
+  is_null(xs) ? [] : [head(xs)].concat(list_to_array(tail(xs)))
+
+// simplify parameter format
+const parameters = (xs) => map((x) => head(tail(x)), xs)
+
+// turn tagged list syntax from parse into JSON object
+const ast_to_json = (t) => {
+  switch (head(t)) {
+    case 'literal':
+      return { tag: 'lit', val: head(tail(t)) }
+    case 'name':
+      return { tag: 'nam', sym: head(tail(t)) }
+    case 'application':
+      return {
+        tag: 'app',
+        fun: ast_to_json(head(tail(t))),
+        args: list_to_array(map(ast_to_json, head(tail(tail(t))))),
+      }
+    case 'logical_composition':
+      return {
+        tag: 'log',
+        sym: head(tail(t)),
+        frst: ast_to_json(head(tail(tail(t)))),
+        scnd: ast_to_json(head(tail(tail(tail(t))))),
+      }
+    case 'binary_operator_combination':
+      return {
+        tag: 'binop',
+        sym: head(tail(t)),
+        frst: ast_to_json(head(tail(tail(t)))),
+        scnd: ast_to_json(head(tail(tail(tail(t))))),
+      }
+    case 'unary_operator_combination':
+      return {
+        tag: 'unop',
+        sym: head(tail(t)),
+        frst: ast_to_json(head(tail(tail(t)))),
+      }
+    case 'lambda_expression':
+      return {
+        tag: 'lam',
+        prms: list_to_array(parameters(head(tail(t)))),
+        body: ast_to_json(head(tail(tail(t)))),
+      }
+    case 'sequence':
+      return {
+        tag: 'seq',
+        stmts: list_to_array(map(ast_to_json, head(tail(t)))),
+      }
+    case 'block':
+      return {
+        tag: 'blk',
+        body: ast_to_json(head(tail(t))),
+      }
+    case 'variable_declaration':
+      return {
+        tag: 'let',
+        sym: head(tail(head(tail(t)))),
+        expr: ast_to_json(head(tail(tail(t)))),
+      }
+    case 'constant_declaration':
+      return {
+        tag: 'const',
+        sym: head(tail(head(tail(t)))),
+        expr: ast_to_json(head(tail(tail(t)))),
+      }
+    case 'assignment':
+      return {
+        tag: 'assmt',
+        sym: head(tail(head(tail(t)))),
+        expr: ast_to_json(head(tail(tail(t)))),
+      }
+    case 'conditional_statement':
+      return {
+        tag: 'cond', // dont distinguish stmt and expr
+        pred: ast_to_json(head(tail(t))),
+        cons: ast_to_json(head(tail(tail(t)))),
+        alt: ast_to_json(head(tail(tail(tail(t))))),
+      }
+    case 'conditional_expression':
+      return {
+        tag: 'cond', // dont distinguish stmt and expr
+        pred: ast_to_json(head(tail(t))),
+        cons: ast_to_json(head(tail(tail(t)))),
+        alt: ast_to_json(head(tail(tail(tail(t))))),
+      }
+    case 'function_declaration':
+      return {
+        tag: 'fun',
+        sym: head(tail(head(tail(t)))),
+        prms: list_to_array(parameters(head(tail(tail(t))))),
+        body: ast_to_json(head(tail(tail(tail(t))))),
+      }
+    case 'return_statement':
+      return {
+        tag: 'ret',
+        expr: ast_to_json(head(tail(t))),
+      }
+    case 'while_loop':
+      return {
+        tag: 'while',
+        pred: ast_to_json(head(tail(t))),
+        body: ast_to_json(head(tail(tail(t)))),
+      }
+    default:
+      error(t, 'unknown syntax:')
+  }
+}
+
+// parse, turn into json (using ast_to_json),
+// and wrap in a block
+const parse_to_json = (program_text) => ({
+  tag: 'blk',
+  body: ast_to_json(parse(program_text)),
+})
+
+// *************************
+// HEAP
+// *************************/
 
 // HEAP is an array of bytes (JS ArrayBuffer)
 
 const word_size = 8
-const mega = 2 ** 20
 
 // heap_make allocates a heap of given size
-// (in megabytes)and returns a DataView of that,
+// (in bytes) and returns a DataView of that,
 // see https://www.javascripture.com/DataView
-const heap_make = (bytes) => {
-  if (bytes % 8 !== 0) error('heap bytes must be divisible by 8')
-  const data = new ArrayBuffer(bytes)
+const heap_make = (words) => {
+  const data = new ArrayBuffer(words * word_size)
   const view = new DataView(data)
   return view
 }
 
-// we randomly pick a heap size of 1000000 bytes
-const HEAP = heap_make(1000000)
+// for convenience, HEAP is global variable
+// initialized in initialize_machine()
+let HEAP
+let heap_size
 
-// free is the next free index in HEAP
-// we keep allocating as if there was no tomorrow
-let free = 0
+// free is the next free index in the free list
+let free
 
 // for debugging: display all bits of the heap
-const heap_display = () => {
-  display('', 'heap:')
-  for (let i = 0; i < free; i++) {
+const heap_display = (s) => {
+  display('', 'heap: ' + s)
+  for (let i = 0; i < heap_size; i++) {
     display(
       word_to_string(heap_get(i)),
       stringify(i) + ' ' + stringify(heap_get(i)) + ' '
@@ -60,18 +181,104 @@ const heap_display = () => {
 //  2 bytes #children, 1 byte unused]
 // Note: payload depends on the type of node
 const size_offset = 5
+
+const node_size = 100
+
 const heap_allocate = (tag, size) => {
+  if (size > node_size) {
+    error('limitation: nodes cannot be larger than 10 words')
+  }
+  // a value of -1 in free indicates the
+  // end of the free list
+  if (free === -1) {
+    mark_sweep()
+  }
+
+  // allocate
   const address = free
-  free += size
-  HEAP.setUint8(address * word_size, tag)
+  free = heap_get(free)
+  HEAP.setInt8(address * word_size, tag)
   HEAP.setUint16(address * word_size + size_offset, size)
   return address
 }
 
+// modified
+const mark_bit = 7
+
+const UNMARKED = 0
+const MARKED = 1
+
+let HEAP_BOTTOM
+let ALLOCATING
+
+const mark_sweep = () => {
+  // mark r for r in roots
+  const roots = [...OS, E, ...RTS, ...ALLOCATING]
+  for (let i = 0; i < roots.length; i++) {
+    mark(roots[i])
+  }
+
+  sweep()
+
+  if (free === -1) {
+    error('heap memory exhausted')
+    // or error("out of memory")
+  }
+}
+
+const mark = (node) => {
+  if (node >= heap_size) {
+    return
+  }
+
+  if (is_unmarked(node)) {
+    heap_set_byte_at_offset(node, mark_bit, MARKED)
+
+    const num_of_children = heap_get_number_of_children(node)
+
+    for (let i = 0; i < num_of_children; i++) {
+      mark(heap_get_child(node, i))
+    }
+  }
+}
+
+const sweep = () => {
+  let v = HEAP_BOTTOM
+
+  while (v < heap_size) {
+    if (is_unmarked(v)) {
+      free_node(v)
+    } else {
+      heap_set_byte_at_offset(v, mark_bit, UNMARKED)
+    }
+
+    v = v + node_size
+  }
+}
+
+const is_unmarked = (node) =>
+  heap_get_byte_at_offset(node, mark_bit) === UNMARKED
+
+const free_node = (node) => {
+  // heap set is used for retrieving the next free node
+  heap_set(node, free)
+  free = node
+}
+
+const heap_already_copied = (node) =>
+  heap_get_forwarding_address(node) >= to_space &&
+  heap_get_forwarding_address(node) <= free
+
+const heap_set_forwarding_address = (node, address) =>
+  HEAP.setInt32(node * word_size, address)
+
+const heap_get_forwarding_address = (node) => HEAP.getInt32(node * word_size)
+
 // get and set a word in heap at given address
 const heap_get = (address) => HEAP.getFloat64(address * word_size)
 
-const heap_set = (address, x) => HEAP.setFloat64(address * word_size, x)
+const heap_set = (address, x) => {
+ HEAP.setFloat64(address * word_size, x)}
 
 // child index starts at 0
 const heap_get_child = (address, child_index) =>
@@ -80,7 +287,7 @@ const heap_get_child = (address, child_index) =>
 const heap_set_child = (address, child_index, value) =>
   heap_set(address + 1 + child_index, value)
 
-const heap_get_tag = (address) => HEAP.getUint8(address * word_size)
+const heap_get_tag = (address) => HEAP.getInt8(address * word_size)
 
 const heap_get_size = (address) =>
   HEAP.getUint16(address * word_size + size_offset)
@@ -89,23 +296,23 @@ const heap_get_size = (address) =>
 // except for number nodes:
 //                 they have size 2 but no children
 const heap_get_number_of_children = (address) =>
-  heap_get_tag(address) === Number_tag ? 0 : get_size(address) - 1
+  heap_get_tag(address) === Number_tag ? 0 : heap_get_size(address) - 1
 
 // access byte in heap, using address and offset
 const heap_set_byte_at_offset = (address, offset, value) =>
   HEAP.setUint8(address * word_size + offset, value)
 
-const heap_get_byte_at_offset = (address, offset, value) =>
+const heap_get_byte_at_offset = (address, offset) =>
   HEAP.getUint8(address * word_size + offset)
 
 // access byte in heap, using address and offset
 const heap_set_2_bytes_at_offset = (address, offset, value) =>
   HEAP.setUint16(address * word_size + offset, value)
 
-const heap_get_2_bytes_at_offset = (address, offset, value) =>
+const heap_get_2_bytes_at_offset = (address, offset) =>
   HEAP.getUint16(address * word_size + offset)
 
-// ADDED CHANGE
+ // ADDED CHANGE
 const heap_set_4_bytes_at_offset = (address, offset, value) =>
   HEAP.setUint32(address * word_size + offset, value)
 
@@ -132,6 +339,11 @@ const word_to_string = (word) => {
 // word of the node is a header, and the first byte of the
 // header is a tag that identifies the type of node
 
+// a little trick: tags are all negative so that we can use
+// the first 4 bytes of the header as forwarding address
+// in garbage collection: If the (signed) Int32 is
+// non-negative, the node has been forwarded already.
+
 const False_tag = 0
 const True_tag = 1
 const Number_tag = 2
@@ -141,16 +353,13 @@ const Undefined_tag = 5
 const Blockframe_tag = 6
 const Callframe_tag = 7
 const Closure_tag = 8
-const Frame_tag = 9
-const Environment_tag = 10
+const Frame_tag = 9 // 0000 1001
+const Environment_tag = 10 // 0000 1010
 const Pair_tag = 11
 const Builtin_tag = 12
-const String_tag = 13 // ADDED CHANGE
+const String_tag = 13
 
-// Record<string, tuple(number, string)> where the key is the hash of the string
-// and the value is a tuple of the address of the string and the string itself
-let stringPool = {} // ADDED CHANGE
-
+let stringPool = {}
 // all values (including literals) are allocated on the heap.
 
 // We allocate canonical values for
@@ -159,29 +368,26 @@ let stringPool = {} // ADDED CHANGE
 
 // boolean values carry their value (0 for false, 1 for true)
 // in the byte following the tag
-const False = heap_allocate(False_tag, 1)
+
+let False
 const is_False = (address) => heap_get_tag(address) === False_tag
-const True = heap_allocate(True_tag, 1)
+let True
 const is_True = (address) => heap_get_tag(address) === True_tag
 
 const is_Boolean = (address) => is_True(address) || is_False(address)
 
-const Null = heap_allocate(Null_tag, 1)
+let Null
 const is_Null = (address) => heap_get_tag(address) === Null_tag
 
-const Unassigned = heap_allocate(Unassigned_tag, 1)
+let Unassigned
 const is_Unassigned = (address) => heap_get_tag(address) === Unassigned_tag
 
-const Undefined = heap_allocate(Undefined_tag, 1)
+let Undefined
 const is_Undefined = (address) => heap_get_tag(address) === Undefined_tag
+let String
+const is_String = (address) => heap_get_tag(address) === String_tag
 
-// ADDED CHANGE
-// strings:
-// [1 byte tag, 4 byte hash to stringPool,
-// 2 bytes #children, 1 byte unused]
-// Note: #children is 0
 
-// Hash any string to a 32-bit unsigned integer
 const hashString = (str) => {
   let hash = 5381
   for (let i = 0; i < str.length; i++) {
@@ -191,14 +397,6 @@ const hashString = (str) => {
   }
   return hash >>> 0
 }
-
-// const result = hashString("hello");
-// display(result, "hash of hello:");
-// const result2 = hashString("hello world");
-// display(result2, "hash of hello world:");
-
-const String = heap_allocate(String_tag, 1)
-const is_String = (address) => heap_get_tag(address) === String_tag
 
 const heap_allocate_String = (str) => {
   const hash = hashString(str)
@@ -221,6 +419,15 @@ const heap_get_string_hash = (address) => heap_get_4_bytes_at_offset(address, 1)
 
 const heap_get_string = (address) =>
   stringPool[heap_get_string_hash(address)][1]
+
+const allocate_literal_values = () => {
+  False = heap_allocate(False_tag, 1)
+  True = heap_allocate(True_tag, 1)
+  Null = heap_allocate(Null_tag, 1)
+  Unassigned = heap_allocate(Unassigned_tag, 1)
+  Undefined = heap_allocate(Undefined_tag, 1)
+  String = heap_allocate(String_tag, 1)
+}
 
 // builtins: builtin id is encoded in second byte
 // [1 byte tag, 1 byte id, 3 bytes unused,
@@ -245,7 +452,9 @@ const heap_get_Builtin_id = (address) => heap_get_byte_at_offset(address, 1)
 //   they could be used to increase pc and #children range
 
 const heap_allocate_Closure = (arity, pc, env) => {
+  ALLOCATING = [env]
   const address = heap_allocate(Closure_tag, 2)
+  ALLOCATING = []
   heap_set_byte_at_offset(address, 1, arity)
   heap_set_2_bytes_at_offset(address, 2, pc)
   heap_set(address + 1, env)
@@ -265,8 +474,10 @@ const is_Closure = (address) => heap_get_tag(address) === Closure_tag
 //  2 bytes #children, 1 byte unused]
 
 const heap_allocate_Blockframe = (env) => {
+  ALLOCATING = [env]
   const address = heap_allocate(Blockframe_tag, 2)
   heap_set(address + 1, env)
+  ALLOCATING = []
   return address
 }
 
@@ -280,7 +491,9 @@ const is_Blockframe = (address) => heap_get_tag(address) === Blockframe_tag
 // followed by the address of env
 
 const heap_allocate_Callframe = (env, pc) => {
+  ALLOCATING = [env]
   const address = heap_allocate(Callframe_tag, 2)
+  ALLOCATING = []
   heap_set_2_bytes_at_offset(address, 2, pc)
   heap_set(address + 1, env)
   return address
@@ -321,8 +534,6 @@ const heap_Frame_display = (address) => {
 const heap_allocate_Environment = (number_of_frames) =>
   heap_allocate(Environment_tag, number_of_frames + 1)
 
-const heap_empty_Environment = heap_allocate_Environment(0)
-
 // access environment given by address
 // using a "position", i.e. a pair of
 // frame index and value index
@@ -333,7 +544,6 @@ const heap_get_Environment_value = (env_address, position) => {
 }
 
 const heap_set_Environment_value = (env_address, position, value) => {
-  //display(env_address, "env_address:")
   const [frame_index, value_index] = position
   const frame_address = heap_get_child(env_address, frame_index)
   heap_set_child(frame_address, value_index, value)
@@ -348,7 +558,10 @@ const heap_set_Environment_value = (env_address, position, value) => {
 // of the new environment
 const heap_Environment_extend = (frame_address, env_address) => {
   const old_size = heap_get_size(env_address)
+  // modified: should not free frame address and env address here
+  ALLOCATING = [frame_address, env_address]
   const new_env_address = heap_allocate_Environment(old_size)
+  ALLOCATING = []
   let i
   for (i = 0; i < old_size - 1; i++) {
     heap_set_child(new_env_address, i, heap_get_child(env_address, i))
@@ -446,9 +659,9 @@ const JS_value_to_address = (x) =>
       )
     : 'unknown word tag: ' + word_to_string(x)
 
-/* ************************
- * compile-time environment
- * ************************/
+// ************************
+// compile-time environment
+// ************************/
 
 // a compile-time environment is an array of
 // compile-time frames, and a compile-time frame
@@ -472,22 +685,19 @@ const value_index = (frame, x) => {
 // in this machine, the builtins take their
 // arguments directly from the operand stack,
 // to save the creation of an intermediate
-// argument array 
-const builtin_object = {
+// argument array
+const builtin_implementation = {
   display: () => {
     const address = OS.pop()
     display(address_to_JS_value(address))
     return address
   },
-  get_time: () => JS_value_to_address(get_time()),
   error: () => error(address_to_JS_value(OS.pop())),
   is_number: () => (is_Number(OS.pop()) ? True : False),
   is_boolean: () => (is_Boolean(OS.pop()) ? True : False),
   is_undefined: () => (is_Undefined(OS.pop()) ? True : False),
   is_string: () => (is_String(OS.pop()) ? True : False), // ADDED CHANGE
   is_function: () => is_Closure(OS.pop()),
-  math_sqrt: () =>
-    JS_value_to_address(math_sqrt(address_to_JS_value(OS.pop()))),
   pair: () => {
     const tl = OS.pop()
     const hd = OS.pop()
@@ -509,17 +719,17 @@ const builtin_object = {
   },
 }
 
-const primitive_object = {}
+const builtins = {}
 const builtin_array = []
 {
   let i = 0
-  for (const key in builtin_object) {
-    primitive_object[key] = {
+  for (const key in builtin_implementation) {
+    builtins[key] = {
       tag: 'BUILTIN',
       id: i,
-      arity: arity(builtin_object[key]),
+      arity: arity(builtin_implementation[key]),
     }
-    builtin_array[i++] = builtin_object[key]
+    builtin_array[i++] = builtin_implementation[key]
   }
 }
 
@@ -535,16 +745,18 @@ const constants = {
   math_SQRT2: math_SQRT2,
 }
 
-for (const key in constants) primitive_object[key] = constants[key]
-
 const compile_time_environment_extend = (vs, e) => {
   //  make shallow copy of e
   return push([...e], vs)
 }
 
 // compile-time frames only need synbols (keys), no values
-const global_compile_frame = Object.keys(primitive_object)
-const global_compile_environment = [global_compile_frame]
+const builtin_compile_frame = Object.keys(builtins)
+const constant_compile_frame = Object.keys(constants)
+const global_compile_environment = [
+  builtin_compile_frame,
+  constant_compile_frame,
+]
 
 /* ********
  * compiler
@@ -844,6 +1056,7 @@ const compile_comp = {
 // compile component into instruction array instrs,
 // starting at wc (write counter)
 const compile = (comp, ce) => {
+  display(comp)
   compile_comp[comp.tag](comp, ce)
 }
 
@@ -854,12 +1067,11 @@ const compile_program = (program) => {
   instrs = []
   compile(program, global_compile_environment)
   instrs[wc] = { tag: 'DONE' }
-  print_code()
 }
 
-/* **********************
- * operators and builtins
- * **********************/
+// **********************
+// operators and builtins
+// **********************/
 
 const binop_microcode = {
   '+': (x, y) =>
@@ -881,12 +1093,10 @@ const binop_microcode = {
 }
 
 // v2 is popped before v1
-const apply_binop = (op, v2, v1) => {
-  let result = JS_value_to_address(
+const apply_binop = (op, v2, v1) =>
+  JS_value_to_address(
     binop_microcode[op](address_to_JS_value(v1), address_to_JS_value(v2))
   )
-  return result
-}
 
 const unop_microcode = {
   '-unary': (x) => -x,
@@ -897,32 +1107,35 @@ const apply_unop = (op, v) =>
   JS_value_to_address(unop_microcode[op](address_to_JS_value(v)))
 
 const apply_builtin = (builtin_id) => {
+  display(builtin_id, 'apply_builtin: builtin_id:')
   const result = builtin_array[builtin_id]()
   OS.pop() // pop fun
   push(OS, result)
 }
 
-// creating global runtime environment
-const primitive_values = Object.values(primitive_object)
-const frame_address = heap_allocate_Frame(primitive_values.length)
-for (let i = 0; i < primitive_values.length; i++) {
-  const primitive_value = primitive_values[i]
-  if (
-    typeof primitive_value === 'object' &&
-    primitive_value.hasOwnProperty('id')
-  ) {
-    heap_set_child(frame_address, i, heap_allocate_Builtin(primitive_value.id))
-  } else if (typeof primitive_value === 'undefined') {
-    heap_set_child(frame_address, i, Undefined)
-  } else {
-    heap_set_child(frame_address, i, heap_allocate_Number(primitive_value))
+const allocate_builtin_frame = () => {
+  const builtin_values = Object.values(builtins)
+  const frame_address = heap_allocate_Frame(builtin_values.length)
+  for (let i = 0; i < builtin_values.length; i++) {
+    const builtin = builtin_values[i]
+    heap_set_child(frame_address, i, heap_allocate_Builtin(builtin.id))
   }
+  return frame_address
 }
 
-const global_environment = heap_Environment_extend(
-  frame_address,
-  heap_empty_Environment
-)
+const allocate_constant_frame = () => {
+  const constant_values = Object.values(constants)
+  const frame_address = heap_allocate_Frame(constant_values.length)
+  for (let i = 0; i < constant_values.length; i++) {
+    const constant_value = constant_values[i]
+    if (typeof constant_value === 'undefined') {
+      heap_set_child(frame_address, i, Undefined)
+    } else {
+      heap_set_child(frame_address, i, heap_allocate_Number(constant_value))
+    }
+  }
+  return frame_address
+}
 
 /* *******
  * machine
@@ -1057,12 +1270,36 @@ const microcode = {
     push(OS, val)
   },
 }
-function update_global_E(pos, value) {
-  for (let i = 0; i < threadQueue.length; i++) {
-    const env = threadQueue[i].e
-    heap_set_Environment_value(env, pos, value)
+
+// running the machine
+
+// set up registers, including free list
+function initialize_machine(heapsize_words) {
+  stringPool = {}
+  OS = []
+  PC = 0
+  RTS = []
+  // modified
+  ALLOCATING = []
+  HEAP_BOTTOM = undefined
+
+  HEAP = heap_make(heapsize_words)
+  heap_size = heapsize_words
+  let i = 0
+  for (i = 0; i <= heapsize_words - node_size; i = i + node_size) {
+    heap_set(i, i + node_size)
   }
-  heap_set_Environment_value(E, pos, value)
+  heap_set(i - node_size, -1)
+  free = 0
+  PC = 0
+  allocate_literal_values()
+  // heap_allocate_String()
+  const builtins_frame = allocate_builtin_frame()
+  const constants_frame = allocate_constant_frame()
+  E = heap_allocate_Environment(0)
+  E = heap_Environment_extend(builtins_frame, E)
+  E = heap_Environment_extend(constants_frame, E)
+  HEAP_BOTTOM = free
 }
 class Thread {
   constructor(os, e, rts, pc) {
@@ -1081,17 +1318,23 @@ class Thread {
     this.pc = PC
   }
 }
+function update_global_E(pos, value) {
+  for (let i = 0; i < threadQueue.length; i++) {
+    const env = threadQueue[i].e
+    heap_set_Environment_value(env, pos, value)
+  }
+  heap_set_Environment_value(E, pos, value)
+}
 let WAIT_GROUP_POS = []
 const waited_thread_queue = []
 let threadQueue = []
-const timeSlice = 1 // Number of instructions to execute per thread
+const timeSlice = 1
 
-//run the main thread
 async function run() {
-  stringPool = {}
-  result=[]
+  initialize_machine(100000000)
+  result = []
   // Create the main goroutine
-  const mainThread = new Thread([], global_environment, [], 0)
+  const mainThread = new Thread([], E, [], 0)
   mainThread.isRunning = true
   threadQueue.push(mainThread)
 
@@ -1121,24 +1364,18 @@ async function run() {
     ) {
       //跑mainthread的function
       const instr = instrs[PC++]
-      // display('=============Current instruction=============')
-      // display(instructionCount)
-      // display(instr)
-      // display(RTS)
-      // display(OS)
-      // display(E)
-      // display(PC)
       await microcode[instr.tag](instr)
       instructionCount++
       //next instruction is receive
-      if (instrs[PC].tag === 'RECEIVE'){
-        const current_value_in_channel = address_to_JS_value(heap_get_Environment_value(E, instrs[PC].pos))
-        if (current_value_in_channel==undefined){
+      if (instrs[PC].tag === 'RECEIVE') {
+        const current_value_in_channel = address_to_JS_value(
+          heap_get_Environment_value(E, instrs[PC].pos)
+        )
+        if (current_value_in_channel == undefined) {
           PC--
-          break;
+          break
         }
       }
-
     }
     //check next instruction which is not actually run in microcode since they have to modify the current thread
     if (instrs[PC].tag === 'ENDTHREAD') {
@@ -1157,7 +1394,6 @@ async function run() {
 
       currentThread.waitgroup_pos = null
       threadQueue = threadQueue.filter((thread) => thread.isRunning)
-
     }
     if (instrs[PC].tag === 'DONE') {
       currentThread.isRunning = false
@@ -1195,78 +1431,8 @@ async function run() {
       }
     }
   }
-  // return address_to_JS_value(peek(mainThread.os, 0))
 }
 
-// debugging
-
-const print_code = () => {
-  for (let i = 0; i < instrs.length; i = i + 1) {
-    const instr = instrs[i]
-    // display(i)
-    // display(instr)
-    display(
-      '',
-      stringify(i) +
-        ': ' +
-        instr.tag +
-        ' ' +
-        (instr.tag === 'GOTO' ? stringify(instr.addr) : '') +
-        (instr.tag === 'ENTER_SCOPE' ? stringify(instr.num) : '') +
-        (instr.tag === 'LDC' ? stringify(instr.val) : '') +
-        (instr.tag === 'ASSIGN' ? stringify(instr.pos) : '') +
-        (instr.tag === 'LD' ? stringify(instr.pos) : '') +
-        (instr.tag === 'BINOP' ? stringify(instr.sym) : '') +
-        (instr.tag === 'JOF' ? stringify(instr.addr) : '')
-    )
-  }
-}
-
-const print_RTS = (x) => {
-  display('', x)
-  for (let i = 0; i < RTS.length; i = i + 1) {
-    const f = RTS[i]
-    display('', stringify(i) + ': ' + f.tag)
-  }
-}
-
-const print_OS = (x) => {
-  display('', x)
-  for (let i = 0; i < OS.length; i = i + 1) {
-    const val = OS[i]
-    display('', stringify(i) + ': ' + address_to_JS_value(val))
-  }
-}
-
-// //for test
-// const run_vm = (jsonASTString) => {
-//   const json = JSON.parse(jsonASTString)
-//   compile_program(json)
-//   return run()
-// }
-// let result = run_vm(
-//   `
-//   {"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"ch"}],"expr":[{"tag":"makechannel"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"hello"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"world"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]}]}}
-// `
-// )
-// display(result)
-
-
-//Original Edition
-// // For connection with VMServer, currently cut to test VM easily
-// const run_vm = (jsonAST) => {
-//   //jsonAST是string
-//   const json = JSON.parse(jsonAST)
-//   compile_program(json)
-//   const result = run()
-//   display(result)
-//   return { result }
-// }
-// module.exports = run_vm
-
-
-
-// For connection with VMServer, currently cut to test VM easily
 let result = []
 const run_vm = async (jsonAST) => {
   return new Promise((resolve, reject) => {
