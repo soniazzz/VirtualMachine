@@ -816,8 +816,6 @@ const compile_comp = {
     }
   },
   gostmt: (comp, ce) => {
-    // Compile the body of the goroutine
-    // compile(comp.callbody, ce)
     // Create a new closure for the goroutine
     instrs[wc++] = { tag: 'LDF', arity: 0, addr: wc + 1 }
     // Jump over the body of the closure
@@ -1034,7 +1032,6 @@ const microcode = {
     update_global_E(instr.pos, JS_value_to_address(0))
   },
   WAITGROUPADD: (instr) => {
-    //开一个新的位置等人拿
     const add_delta = OS.pop()
     for (let i = 0; i < address_to_JS_value(add_delta); i++) {
       WAIT_GROUP_POS.push(instr.pos)
@@ -1106,9 +1103,7 @@ async function run() {
     } else {
       currentThread = threadQueue.shift()
     }
-    //把排到的thread拿出来
-    //OS,PC,E,RTS 总是暂存正在用的thread的环境
-    OS = currentThread.os
+   
     PC = currentThread.pc
     E = currentThread.e
     RTS = currentThread.rts
@@ -1119,7 +1114,7 @@ async function run() {
       !(instrs[PC].tag === 'DONE' || instrs[PC].tag === 'ENDTHREAD') &&
       !(instrs[PC].tag === 'WAIT')
     ) {
-      //跑mainthread的function
+      //run mainthread
       const instr = instrs[PC++]
       // display('=============Current instruction=============')
       // display(instructionCount)
@@ -1238,35 +1233,6 @@ const print_OS = (x) => {
   }
 }
 
-// //for test
-// const run_vm = (jsonASTString) => {
-//   const json = JSON.parse(jsonASTString)
-//   compile_program(json)
-//   return run()
-// }
-// let result = run_vm(
-//   `
-//   {"tag":"blk","body":{"tag":"seq","stmts":[{"tag":"decl","sym":[{"tag":"nam","sym":"ch"}],"expr":[{"tag":"makechannel"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"hello"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]},{"tag":"send","chan":"ch","val":{"tag":"lit","val":"world"}},{"tag":"display","content":[{"tag":"receive","chan":"ch"}]}]}}
-// `
-// )
-// display(result)
-
-
-//Original Edition
-// // For connection with VMServer, currently cut to test VM easily
-// const run_vm = (jsonAST) => {
-//   //jsonAST是string
-//   const json = JSON.parse(jsonAST)
-//   compile_program(json)
-//   const result = run()
-//   display(result)
-//   return { result }
-// }
-// module.exports = run_vm
-
-
-
-// For connection with VMServer, currently cut to test VM easily
 let result = []
 const run_vm = async (jsonAST) => {
   return new Promise((resolve, reject) => {

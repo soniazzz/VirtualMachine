@@ -1028,8 +1028,6 @@ const compile_comp = {
     }
   },
   gostmt: (comp, ce) => {
-    // Compile the body of the goroutine
-    // compile(comp.callbody, ce)
     // Create a new closure for the goroutine
     instrs[wc++] = { tag: 'LDF', arity: 0, addr: wc + 1 }
     // Jump over the body of the closure
@@ -1247,7 +1245,6 @@ const microcode = {
     for (let i = 0; i < num; i++) {
       values.push(OS.pop())
     }
-    // display(values.map(address_to_JS_value).reverse())
     result.push(values.map(address_to_JS_value).reverse())
   },
   STARTTHREAD: (instr) => {
@@ -1267,7 +1264,6 @@ const microcode = {
     update_global_E(instr.pos, JS_value_to_address(0))
   },
   WAITGROUPADD: (instr) => {
-    //开一个新的位置等人拿
     const add_delta = OS.pop()
     for (let i = 0; i < address_to_JS_value(add_delta); i++) {
       WAIT_GROUP_POS.push(instr.pos)
@@ -1299,6 +1295,7 @@ const microcode = {
     push(OS, val)
     ReceiverReady=false
     SenderReady=false
+    update_global_E(instr.pos, JS_value_to_address(undefined))
   },
 }
 
@@ -1381,8 +1378,7 @@ async function run() {
     } else {
       currentThread = threadQueue.shift()
     }
-    //把排到的thread拿出来
-    //OS,PC,E,RTS 总是暂存正在用的thread的环境
+
     OS = currentThread.os
     PC = currentThread.pc
     E = currentThread.e
@@ -1394,7 +1390,7 @@ async function run() {
       !(instrs[PC].tag === 'DONE' || instrs[PC].tag === 'ENDTHREAD') &&
       !(instrs[PC].tag === 'WAIT')
     ) {
-      //跑mainthread的function
+      //run main thread
       const instr = instrs[PC++]
       await microcode[instr.tag](instr)
       instructionCount++
@@ -1443,18 +1439,19 @@ async function run() {
     if (instrs[PC].tag === 'ENDTHREAD') {
       currentThread.isRunning = false
       //decrease the wait group counter globally
-      const original_counter = heap_get_Environment_value(
-        E,
-        currentThread.waitgroup_pos
-      )
-      const new_counter = apply_binop(
-        '-',
-        original_counter,
-        JS_value_to_address(1)
-      )
-      update_global_E(currentThread.waitgroup_pos, new_counter)
-
-      currentThread.waitgroup_pos = null
+      if (currentThread.waitgroup_pos!==null){
+        const original_counter = heap_get_Environment_value(
+          E,
+          currentThread.waitgroup_pos
+        )
+        const new_counter = apply_binop(
+          '-',
+          original_counter,
+          JS_value_to_address(1)
+        )
+        update_global_E(currentThread.waitgroup_pos, new_counter)
+        currentThread.waitgroup_pos = null
+      }
       threadQueue = threadQueue.filter((thread) => thread.isRunning)
     }
     if (instrs[PC].tag === 'DONE') {

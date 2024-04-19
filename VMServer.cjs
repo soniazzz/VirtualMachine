@@ -1,4 +1,7 @@
+//can comment out to see what happens without garbage collection but this edition of VM has some minor bugs, will produce error message if you run large recursion 
 // const run_vm=require('./VM.cjs')
+
+//This is the ultimate VM with garbage collection
 const run_vm = require('./VMwithGC.cjs')
 const express = require('express')
 const cors = require('cors')
@@ -13,6 +16,7 @@ app.post('/run-vm', (req, res) => {
     const { message } = req.body
     run_vm(message)
       .then(({ result }) => {
+        console.log("Here is the result to be printed out")
         console.log(result)
         res.json({ success: true, reply: result })
       })
